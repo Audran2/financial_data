@@ -7,8 +7,8 @@ from google.cloud import storage
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-TWELVEDATA_API_KEY = os.getenv("TWELVEDATA_KEY", "xxxxx")
-FMP_API_KEY = os.getenv("FMP_KEY", "xxxxxxx")
+TWELVEDATA_API_KEY = os.getenv("TWELVEDATA_KEY")
+FMP_API_KEY = os.getenv("FMP_KEY")
 PROJECT_ID = os.getenv("PROJECT_ID")
 BUCKET_NAME = os.getenv("BUCKET_NAME")
 

@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+venv/
+.venv/
+
+# Env / secrets
+.env
+.env.*
+*.key
+*.pem
+gcp_key.json
+service-account*.json
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+
+# Spark
+*.log
+metastore_db/
+spark-warehouse/

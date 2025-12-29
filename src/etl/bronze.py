@@ -7,10 +7,10 @@ from google.cloud import storage
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-TWELVEDATA_API_KEY = os.getenv("TWELVEDATA_KEY", "xxxxx")
-FMP_API_KEY = os.getenv("FMP_KEY", "xxxxxxx")
-PROJECT_ID = "xxxxxx"
-BUCKET_NAME = "xxxxxx"
+TWELVEDATA_API_KEY = os.getenv("TWELVEDATA_KEY")
+FMP_API_KEY = os.getenv("FMP_KEY")
+PROJECT_ID = "tribal-pillar-480213-i1"
+BUCKET_NAME = "finance_datalake"
 
 SYMBOLS = ["AAPL", "GOOGL", "MSFT", "TSLA", "NVDA", "AMZN"]
 

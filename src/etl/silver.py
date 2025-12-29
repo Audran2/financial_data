@@ -6,7 +6,7 @@ from pyspark.sql.functions import (
 from datetime import datetime
 
 # --- CONFIGURATION ---
-BUCKET_NAME = "xxxxxxx"
+BUCKET_NAME = "finance_datalake"
 TODAY_STR = datetime.now().strftime("%Y-%m-%d")
 
 PATH_BRONZE_PRICES = f"gs://{BUCKET_NAME}/bronze/twelvedata/prices/dt={TODAY_STR}/"
@@ -18,6 +18,7 @@ PATH_SILVER_FUND = f"gs://{BUCKET_NAME}/silver/fundamentals/"
 spark = SparkSession.builder \
     .appName("Finance_Bronze_To_Silver_ETL") \
     .config("spark.sql.sources.partitionOverwriteMode", "dynamic") \
+    .config("spark.sql.legacy.timeParserPolicy", "CORRECTED") \
     .getOrCreate()
 
 
@@ -27,7 +28,7 @@ def process_prices_timeseries():
     try:
         df_raw = spark.read.json(PATH_BRONZE_PRICES)
     except Exception as e:
-        print(f"Pas de données de prix pour aujourd'hui: {e}")
+        print(f"Pas de données de prix pour aujourd'hui (path: {PATH_BRONZE_PRICES}): {e}")
         return
 
     df_silver = df_raw.select(
@@ -53,6 +54,8 @@ def process_prices_timeseries():
         .partitionBy("trade_date") \
         .parquet(PATH_SILVER_PRICES)
 
+    print(f"Ecriture terminée pour Silver Prices dans {PATH_SILVER_PRICES}")
+
 
 def process_fundamentals_scd2():
     print(f"--- {TODAY_STR} - Processing FUNDAMENTALS (SCD2) ---")
@@ -74,7 +77,6 @@ def process_fundamentals_scd2():
 
     try:
         df_history = spark.read.parquet(PATH_SILVER_FUND)
-
         df_active = df_history.filter(col("is_current") == True)
         df_closed = df_history.filter(col("is_current") == False)
     except:
@@ -88,11 +90,19 @@ def process_fundamentals_scd2():
             .withColumn("end_date", lit(None).cast("date")) \
             .withColumn("is_current", lit(True))
     else:
-        df_active = df_active.withColumnRenamed("symbol", "h_symbol") \
-            .withColumnRenamed("pe_ratio", "h_pe_ratio")
+        df_active_renamed = df_active.select(
+            col("symbol").alias("h_symbol"),
+            col("pe_ratio").alias("h_pe_ratio"),
+            col("debt_to_equity").alias("h_debt_to_equity"),
+            col("current_ratio").alias("h_current_ratio"),
+            col("start_date"),
+            col("end_date"),
+            col("is_current"),
+            col("report_date").alias("h_report_date")
+        )
 
-        cond = [df_new.symbol == df_active.h_symbol]
-        joined = df_new.join(df_active, cond, "left_outer")
+        cond = [df_new.symbol == df_active_renamed.h_symbol]
+        joined = df_new.join(df_active_renamed, cond, "left_outer")
 
         changed_records = joined.filter(
             (col("h_symbol").isNotNull()) &
@@ -103,9 +113,9 @@ def process_fundamentals_scd2():
             col("effective_date").alias("end_date"),
             lit(False).alias("is_current"),
             col("h_pe_ratio").alias("pe_ratio"),
-            col("debt_to_equity"),
-            col("current_ratio"),
-            col("report_date")
+            col("h_debt_to_equity").alias("debt_to_equity"),
+            col("h_current_ratio").alias("current_ratio"),
+            col("h_report_date").alias("report_date")
         )
 
         new_records = joined.select(
@@ -120,17 +130,8 @@ def process_fundamentals_scd2():
         )
 
         unchanged_ids = df_active.join(df_new,
-                                       df_active.h_symbol == df_new.symbol,
-                                       "left_anti").select(
-            col("h_symbol").alias("symbol"),
-            col("start_date"),
-            col("end_date"),
-            col("is_current"),
-            col("h_pe_ratio").alias("pe_ratio"),
-            col("debt_to_equity"),
-            col("current_ratio"),
-            col("report_date")
-        )
+                                       df_active.symbol == df_new.symbol,
+                                       "left_anti")
 
         df_final = df_closed.unionByName(changed_records, allowMissingColumns=True) \
             .unionByName(new_records, allowMissingColumns=True) \

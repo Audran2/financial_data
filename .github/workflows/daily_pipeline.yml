@@ -1,0 +1,59 @@
+name: Daily Finance Pipeline
+
+on:
+  schedule:
+    - cron: '0 23 * * 1-5'
+  workflow_dispatch:
+
+jobs:
+  run-data-pipeline:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Set up JDK 11
+        uses: actions/setup-java@v3
+        with:
+          java-version: '11'
+          distribution: 'temurin'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v1
+        with:
+          credentials_json: '${{ secrets.GCP_SA_KEY }}'
+
+      - name: Create Key File for Spark
+        run: |
+          echo "${{ secrets.GCP_SA_KEY }}" | base64 -d > /tmp/gcp_key.json
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: /tmp/gcp_key.json
+
+      - name: Run Pipeline
+        env:
+          TWELVEDATA_KEY: ${{ secrets.TWELVEDATA_KEY }}
+          FMP_KEY: ${{ secrets.FMP_KEY }}
+          GOOGLE_APPLICATION_CREDENTIALS: /tmp/gcp_key.json
+        run: |
+          echo "--- Lancement Ingestion ---"
+          python src/etl/bronze.py
+          
+          echo "--- Lancement Spark Silver ---"
+          python src/etl/silver.py
+          
+          echo "--- Lancement Spark Gold ---"
+          python src/etl/gold.py
+          
+          echo "--- Lancement ML & Backtest ---"
+          python src/etl/spark_ml.py

@@ -6,7 +6,7 @@ from pyspark.sql.functions import (
 )
 
 # --- CONFIGURATION ---
-BUCKET_NAME = "xxxxxxx"
+BUCKET_NAME = "finance_datalake"
 spark = SparkSession.builder.appName("Finance_Gold_Advanced_Features").getOrCreate()
 
 

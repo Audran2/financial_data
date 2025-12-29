@@ -7,7 +7,7 @@ from pyspark.ml.tuning import ParamGridBuilder, CrossValidator
 from pyspark.sql.functions import col, when, sum as spark_sum, avg
 
 # --- CONFIGURATION ---
-BUCKET_NAME = "xxxxxxx"
+BUCKET_NAME = "finance_datalake"
 spark = SparkSession.builder.appName("Finance_Pro_ML_Backtest").getOrCreate()
 
 

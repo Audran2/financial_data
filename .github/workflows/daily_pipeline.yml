@@ -54,7 +54,7 @@ jobs:
           SYMBOLS: "AAPL,GOOGL,MSFT,TSLA,NVDA,AMZN,META,AMD"
         run: |
           echo "--- Lancement Ingestion ---"
-          python src/etl/bronze.py
+          # python src/etl/bronze.py
           
           echo "--- Lancement Spark Silver ---"
           python src/etl/silver.py

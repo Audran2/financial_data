@@ -79,7 +79,7 @@ def process_fundamentals_scd2():
 
     df_new = df_new_raw.select(
         col("symbol"),
-        col("date").alias("report_date"),
+        lit(TODAY_STR).cast("date").alias("report_date"),
         col("peRatioTTM").cast("double").alias("pe_ratio"),
         col("debtToEquityTTM").cast("double").alias("debt_to_equity"),
         col("currentRatioTTM").cast("double").alias("current_ratio"),
@@ -149,7 +149,6 @@ def process_fundamentals_scd2():
             .unionByName(unchanged_ids, allowMissingColumns=True)
 
     print(f"Écriture/Overwrite SCD2 dans {PATH_SILVER_FUND}")
-
     df_final.write.mode("overwrite").parquet(PATH_SILVER_FUND)
 
 

@@ -39,7 +39,8 @@ def process_prices_timeseries():
     try:
         df_raw = spark.read.json(PATH_BRONZE_PRICES)
     except Exception as e:
-        print(f"Pas de données de prix pour aujourd'hui (path: {PATH_BRONZE_PRICES}): {e}")
+        print(f"[WARN] Pas de données de PRIX pour {TODAY_STR} (Path introuvable ou vide).")
+        print(f"Erreur détail: {e}")
         return
 
     df_silver = df_raw.select(
@@ -65,7 +66,7 @@ def process_prices_timeseries():
         .partitionBy("trade_date") \
         .parquet(PATH_SILVER_PRICES)
 
-    print(f"Ecriture terminée pour Silver Prices dans {PATH_SILVER_PRICES}")
+    print(f"[SUCCESS] Silver Prices mis à jour.")
 
 
 def process_fundamentals_scd2():
@@ -74,8 +75,15 @@ def process_fundamentals_scd2():
     try:
         df_new_raw = spark.read.json(PATH_BRONZE_FUND)
     except Exception as e:
-        print(f"Pas de données fondamentales pour aujourd'hui: {e}")
+        print(f"[WARN] Pas de données FONDAMENTALES pour {TODAY_STR}.")
         return
+
+    required_cols = ["peRatioTTM", "debtToEquityTTM", "currentRatioTTM"]
+
+    for c in required_cols:
+        if c not in df_new_raw.columns:
+            print(f"[WARN] Colonne '{c}' manquante dans le Bronze. Ajout de NULL.")
+            df_new_raw = df_new_raw.withColumn(c, lit(None))
 
     df_new = df_new_raw.select(
         col("symbol"),
@@ -91,7 +99,7 @@ def process_fundamentals_scd2():
         df_active = df_history.filter(col("is_current") == True)
         df_closed = df_history.filter(col("is_current") == False)
     except:
-        print("Premier run: Création de la table Silver Fundamentals.")
+        print("[INFO] Premier run: Création de la table Silver Fundamentals.")
         df_history = None
         df_active = None
         df_closed = None
@@ -148,11 +156,10 @@ def process_fundamentals_scd2():
             .unionByName(new_records, allowMissingColumns=True) \
             .unionByName(unchanged_ids, allowMissingColumns=True)
 
-    print(f"Écriture/Overwrite SCD2 dans {PATH_SILVER_FUND}")
+    print(f"[SUCCESS] Écriture SCD2 dans {PATH_SILVER_FUND}")
     df_final.write.mode("overwrite").parquet(PATH_SILVER_FUND)
 
 
 if __name__ == "__main__":
     process_prices_timeseries()
     process_fundamentals_scd2()
-    print("ETL Bronze -> Silver terminé.")

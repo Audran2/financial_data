@@ -7,10 +7,11 @@ from datetime import datetime
 import os
 
 # --- CONFIGURATION ---
-BUCKET_NAME = "finance_datalake"
+BUCKET_NAME = os.getenv("BUCKET_NAME", "finance_datalake")
 TODAY_STR = datetime.now().strftime("%Y-%m-%d")
 
 KEY_PATH = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "/tmp/gcp_key.json")
+JAR_PATH = "/tmp/gcs-connector.jar"
 
 PATH_BRONZE_PRICES = f"gs://{BUCKET_NAME}/bronze/twelvedata/prices/dt={TODAY_STR}/"
 PATH_SILVER_PRICES = f"gs://{BUCKET_NAME}/silver/prices/"
@@ -22,9 +23,11 @@ spark = SparkSession.builder \
     .appName("Finance_Bronze_To_Silver_ETL") \
     .config("spark.sql.sources.partitionOverwriteMode", "dynamic") \
     .config("spark.sql.legacy.timeParserPolicy", "CORRECTED") \
-    .config("spark.jars.packages", "com.google.cloud.bigdataoss:gcs-connector:hadoop3-2.2.6") \
+    .config("spark.jars", JAR_PATH) \
+    .config("spark.driver.extraClassPath", JAR_PATH) \
+    .config("spark.executor.extraClassPath", JAR_PATH) \
     .config("spark.hadoop.fs.gs.impl", "com.google.cloud.hadoop.fs.gcs.GoogleHadoopFileSystem") \
-    .config("spark.hadoop.fs.AbstractFileSystem.gs.impl", "com.google.cloud.hadoop.fs.gcs.GoogleHadoopFS") \
+    .config("spark.hadoop.fs.AbstractFileSystem.gs.impl", "com.google.cloud.hadoop.fs.gcs.GoogleHadoopFileSystem") \
     .config("spark.hadoop.google.cloud.auth.service.account.enable", "true") \
     .config("spark.hadoop.google.cloud.auth.service.account.json.keyfile", KEY_PATH) \
     .getOrCreate()

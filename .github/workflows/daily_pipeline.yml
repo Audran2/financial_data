@@ -42,7 +42,7 @@ jobs:
 
       - name: Run Pipeline
         env:
-          TWELVEDATA_KEY: ${{ secrets.TWELVEDATA_KEY }}
+          TWELVE_DATA_KEY: ${{ secrets.TWELVE_DATA_KEY }}
           FMP_KEY: ${{ secrets.FMP_KEY }}
           GOOGLE_APPLICATION_CREDENTIALS: /tmp/gcp_key.json
           SPARK_JARS: /tmp/gcs-connector.jar

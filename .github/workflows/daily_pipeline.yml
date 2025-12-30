@@ -37,8 +37,6 @@ jobs:
       - name: Setup Spark Environment (Key & JAR)
         run: |
           echo "${{ secrets.GCP_SA_KEY }}" | base64 -d > /tmp/gcp_key.json
-          curl -L https://repo1.maven.org/maven2/com/google/cloud/bigdataoss/gcs-connector/hadoop3-2.2.22/gcs-connector-hadoop3-2.2.22-shaded.jar --output /tmp/gcs-connector.jar
-          ls -lh /tmp/gcs-connector.jar
 
       - name: Run Pipeline
         env:

@@ -1,4 +1,5 @@
 import os
+
 from pyspark.sql import SparkSession
 from pyspark.sql.window import Window
 from pyspark.sql.functions import (
@@ -8,7 +9,19 @@ from pyspark.sql.functions import (
 
 # --- CONFIGURATION ---
 BUCKET_NAME = os.getenv("BUCKET_NAME")
-spark = SparkSession.builder.appName("Finance_Gold_Advanced_Features").getOrCreate()
+KEY_PATH = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+JAR_PATH = os.getenv("SPARK_JARS")
+
+spark = SparkSession.builder \
+    .appName("Finance_Gold_Advanced_Features") \
+    .config("spark.jars", JAR_PATH) \
+    .config("spark.driver.extraClassPath", JAR_PATH) \
+    .config("spark.executor.extraClassPath", JAR_PATH) \
+    .config("spark.hadoop.fs.gs.impl", "com.google.cloud.hadoop.fs.gcs.GoogleHadoopFileSystem") \
+    .config("spark.hadoop.fs.AbstractFileSystem.gs.impl", "com.google.cloud.hadoop.fs.gcs.GoogleHadoopFileSystem") \
+    .config("spark.hadoop.google.cloud.auth.service.account.enable", "true") \
+    .config("spark.hadoop.google.cloud.auth.service.account.json.keyfile", KEY_PATH) \
+    .getOrCreate()
 
 
 def calculate_technical_indicators(df):

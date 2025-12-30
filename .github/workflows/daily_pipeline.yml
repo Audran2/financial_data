@@ -51,7 +51,7 @@ jobs:
           BUCKET_NAME: "finance_datalake"
         run: |
           echo "--- Lancement Ingestion ---"
-          python src/etl/bronze.py
+          # python src/etl/bronze.py
           
           echo "--- Lancement Spark Silver ---"
           python src/etl/silver.py

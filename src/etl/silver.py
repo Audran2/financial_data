@@ -30,17 +30,40 @@ spark = SparkSession.builder \
     .config("spark.hadoop.fs.AbstractFileSystem.gs.impl", "com.google.cloud.hadoop.fs.gcs.GoogleHadoopFileSystem") \
     .config("spark.hadoop.google.cloud.auth.service.account.enable", "true") \
     .config("spark.hadoop.google.cloud.auth.service.account.json.keyfile", KEY_PATH) \
+    .config("spark.hadoop.mapreduce.fileoutputcommitter.marksuccessfuljobs", "false") \
     .getOrCreate()
+
+
+def union_dataframes_safe(df1, df2):
+    """
+    Fusionne deux DataFrames manuellement.
+    Remplace allowMissingColumns=True qui n'existe pas sur les vieilles versions Spark.
+    """
+    if df1 is None: return df2
+    if df2 is None: return df1
+
+    cols1 = set(df1.columns)
+    cols2 = set(df2.columns)
+    all_cols = sorted(list(cols1.union(cols2)))
+
+    def add_missing(df, ref_cols):
+        for c in all_cols:
+            if c not in ref_cols:
+                df = df.withColumn(c, lit(None))
+        return df.select(all_cols)
+
+    df1_aligned = add_missing(df1, cols1)
+    df2_aligned = add_missing(df2, cols2)
+
+    return df1_aligned.unionByName(df2_aligned)
 
 
 def process_prices_timeseries():
     print(f"--- {TODAY_STR} - Processing PRICES ---")
-
     try:
         df_raw = spark.read.json(PATH_BRONZE_PRICES)
     except Exception as e:
-        print(f"[WARN] Pas de données de PRIX pour {TODAY_STR} (Path introuvable ou vide).")
-        print(f"Erreur détail: {e}")
+        print(f"[WARN] Pas de données de PRIX pour {TODAY_STR}.")
         return
 
     df_silver = df_raw.select(
@@ -59,19 +82,14 @@ def process_prices_timeseries():
         current_timestamp().alias("ingestion_ts")
     )
 
-    df_dedup = df_silver.dropDuplicates(["symbol", "trade_date"])
-
-    df_dedup.write \
-        .mode("append") \
-        .partitionBy("trade_date") \
-        .parquet(PATH_SILVER_PRICES)
-
+    # Optimisation écriture
+    df_silver.dropDuplicates(["symbol", "trade_date"]) \
+        .write.mode("append").partitionBy("trade_date").parquet(PATH_SILVER_PRICES)
     print(f"[SUCCESS] Silver Prices mis à jour.")
 
 
 def process_fundamentals_scd2():
     print(f"--- {TODAY_STR} - Processing FUNDAMENTALS (SCD2) ---")
-
     try:
         df_new_raw = spark.read.json(PATH_BRONZE_FUND)
     except Exception as e:
@@ -79,10 +97,9 @@ def process_fundamentals_scd2():
         return
 
     required_cols = ["peRatioTTM", "debtToEquityTTM", "currentRatioTTM"]
-
     for c in required_cols:
         if c not in df_new_raw.columns:
-            print(f"[WARN] Colonne '{c}' manquante dans le Bronze. Ajout de NULL.")
+            print(f"[WARN] Colonne '{c}' manquante. Ajout de NULL.")
             df_new_raw = df_new_raw.withColumn(c, lit(None))
 
     df_new = df_new_raw.select(
@@ -99,10 +116,8 @@ def process_fundamentals_scd2():
         df_active = df_history.filter(col("is_current") == True)
         df_closed = df_history.filter(col("is_current") == False)
     except:
-        print("[INFO] Premier run: Création de la table Silver Fundamentals.")
-        df_history = None
-        df_active = None
-        df_closed = None
+        print("[INFO] Premier run: Création Silver.")
+        df_history, df_active, df_closed = None, None, None
 
     if df_active is None:
         df_final = df_new.withColumn("start_date", col("effective_date")) \
@@ -110,51 +125,31 @@ def process_fundamentals_scd2():
             .withColumn("is_current", lit(True))
     else:
         df_active_renamed = df_active.select(
-            col("symbol").alias("h_symbol"),
-            col("pe_ratio").alias("h_pe_ratio"),
-            col("debt_to_equity").alias("h_debt_to_equity"),
-            col("current_ratio").alias("h_current_ratio"),
-            col("start_date"),
-            col("end_date"),
-            col("is_current"),
-            col("report_date").alias("h_report_date")
+            col("symbol").alias("h_symbol"), col("pe_ratio").alias("h_pe_ratio"),
+            col("debt_to_equity").alias("h_debt_to_equity"), col("current_ratio").alias("h_current_ratio"),
+            col("start_date"), col("end_date"), col("is_current"), col("report_date").alias("h_report_date")
         )
 
-        cond = [df_new.symbol == df_active_renamed.h_symbol]
-        joined = df_new.join(df_active_renamed, cond, "left_outer")
+        joined = df_new.join(df_active_renamed, df_new.symbol == df_active_renamed.h_symbol, "left_outer")
 
-        changed_records = joined.filter(
-            (col("h_symbol").isNotNull()) &
-            (col("pe_ratio") != col("h_pe_ratio"))
-        ).select(
-            col("h_symbol").alias("symbol"),
-            col("start_date"),
-            col("effective_date").alias("end_date"),
-            lit(False).alias("is_current"),
-            col("h_pe_ratio").alias("pe_ratio"),
-            col("h_debt_to_equity").alias("debt_to_equity"),
-            col("h_current_ratio").alias("current_ratio"),
+        changed = joined.filter((col("h_symbol").isNotNull()) & (col("pe_ratio") != col("h_pe_ratio"))).select(
+            col("h_symbol").alias("symbol"), col("start_date"), col("effective_date").alias("end_date"),
+            lit(False).alias("is_current"), col("h_pe_ratio").alias("pe_ratio"),
+            col("h_debt_to_equity").alias("debt_to_equity"), col("h_current_ratio").alias("current_ratio"),
             col("h_report_date").alias("report_date")
         )
 
-        new_records = joined.select(
-            col("symbol"),
-            col("effective_date").alias("start_date"),
-            lit(None).cast("date").alias("end_date"),
-            lit(True).alias("is_current"),
-            col("pe_ratio"),
-            col("debt_to_equity"),
-            col("current_ratio"),
+        new_recs = joined.select(
+            col("symbol"), col("effective_date").alias("start_date"), lit(None).cast("date").alias("end_date"),
+            lit(True).alias("is_current"), col("pe_ratio"), col("debt_to_equity"), col("current_ratio"),
             col("report_date")
         )
 
-        unchanged_ids = df_active.join(df_new,
-                                       df_active.symbol == df_new.symbol,
-                                       "left_anti")
+        unchanged = df_active.join(df_new, df_active.symbol == df_new.symbol, "left_anti")
 
-        df_final = df_closed.unionByName(changed_records, allowMissingColumns=True) \
-            .unionByName(new_records, allowMissingColumns=True) \
-            .unionByName(unchanged_ids, allowMissingColumns=True)
+        step1 = union_dataframes_safe(df_closed, changed)
+        step2 = union_dataframes_safe(step1, new_recs)
+        df_final = union_dataframes_safe(step2, unchanged)
 
     print(f"[SUCCESS] Écriture SCD2 dans {PATH_SILVER_FUND}")
     df_final.write.mode("overwrite").parquet(PATH_SILVER_FUND)

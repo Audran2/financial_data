@@ -55,11 +55,17 @@ def calculate_technical_indicators(df):
 
 
 def create_advanced_gold():
+    print("--- Début Gold Layer ---")
+
     try:
         df_prices = spark.read.parquet(f"gs://{BUCKET_NAME}/silver/prices/")
         df_fund = spark.read.parquet(f"gs://{BUCKET_NAME}/silver/fundamentals/")
+
+        print(f"DEBUG: Lignes Prix trouvées : {df_prices.count()}")
+        print(f"DEBUG: Lignes Fondamentaux trouvées : {df_fund.count()}")
+
     except Exception as e:
-        print(f"[ERREUR] Impossible de lire les données Silver : {e}")
+        print(f"[ERREUR] Impossible de lire Silver : {e}")
         return
 
     df_fund_clean = df_fund.withColumn("end_date_filled", coalesce(col("end_date"), lit("2099-12-31").cast("date")))
@@ -71,24 +77,36 @@ def create_advanced_gold():
     ]
 
     df_joined = df_prices.join(df_fund_clean, cond, "left").drop(df_fund_clean.symbol)
+    print(f"DEBUG: Lignes après Jointure : {df_joined.count()}")
 
     df_indicators = calculate_technical_indicators(df_joined)
 
     w_lead = Window.partitionBy("symbol").orderBy("trade_date")
 
-    df_final = df_indicators.select(
+    # Sélection
+    df_final_temp = df_indicators.select(
         "symbol", "trade_date", "close", "volume",
         col("rsi_14"),
         col("macd_line"),
         ((col("close") - col("bollinger_lower")) / (col("bollinger_upper") - col("bollinger_lower"))).alias("pct_b"),
         col("pe_ratio"), col("debt_to_equity"),
-        ((lead("close", 1).over(w_lead) - col("close")) / col("close")).alias("target_return_next_day"),
-        lead("close", 1).over(w_lead).alias("target_price_next_day")
-    ).dropna()
+        ((lead("close", 1).over(w_lead) - col("close")) / col("close")).alias("target_return_next_day")
+    )
 
-    output_path = f"gs://{BUCKET_NAME}/gold/advanced_features/"
-    df_final.write.mode("overwrite").partitionBy("symbol").parquet(output_path)
-    print("Gold Advanced terminé avec succès.")
+    df_filled = df_final_temp.na.fill(0, subset=["pe_ratio", "debt_to_equity", "rsi_14", "macd_line", "pct_b"])
+
+    df_final = df_filled.dropna(subset=["trade_date", "close"])
+
+    count_final = df_final.count()
+    print(f"DEBUG: Lignes FINALES à écrire : {count_final}")
+
+    if count_final == 0:
+        print("[ALERTE] Le DataFrame final est vide ! Vérifie les dates de jointure ou les données Silver.")
+    else:
+        output_path = f"gs://{BUCKET_NAME}/gold/advanced_features/"
+        print(f"Écriture Gold dans : {output_path}")
+        df_final.write.mode("overwrite").partitionBy("symbol").parquet(output_path)
+        print("Gold Advanced terminé avec succès.")
 
 
 if __name__ == "__main__":

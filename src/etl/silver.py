@@ -113,10 +113,15 @@ def process_fundamentals_scd2():
 
     try:
         df_history = spark.read.parquet(PATH_SILVER_FUND)
+
+        df_history.cache()
+        row_count = df_history.count()
+        print(f"[INFO] Historique chargé en cache : {row_count} lignes.")
+
         df_active = df_history.filter(col("is_current") == True)
         df_closed = df_history.filter(col("is_current") == False)
-    except:
-        print("[INFO] Premier run: Création Silver.")
+    except Exception as e:
+        print(f"[INFO] Premier run ou erreur lecture historique ({e}). Création Silver.")
         df_history, df_active, df_closed = None, None, None
 
     if df_active is None:
@@ -153,6 +158,9 @@ def process_fundamentals_scd2():
 
     print(f"[SUCCESS] Écriture SCD2 dans {PATH_SILVER_FUND}")
     df_final.write.mode("overwrite").parquet(PATH_SILVER_FUND)
+
+    if df_history:
+        df_history.unpersist()
 
 
 if __name__ == "__main__":

@@ -1,3 +1,5 @@
+import os
+
 from pyspark.sql import SparkSession
 from pyspark.ml import Pipeline
 from pyspark.ml.feature import VectorAssembler, StandardScaler
@@ -7,8 +9,20 @@ from pyspark.ml.tuning import ParamGridBuilder, CrossValidator
 from pyspark.sql.functions import col, when, sum as spark_sum, avg
 
 # --- CONFIGURATION ---
-BUCKET_NAME = "finance_datalake"
-spark = SparkSession.builder.appName("Finance_Pro_ML_Backtest").getOrCreate()
+BUCKET_NAME = os.getenv("BUCKET_NAME", "finance_datalake")
+KEY_PATH = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "/tmp/gcp_key.json")
+JAR_PATH = "/tmp/gcs-connector.jar"
+
+spark = SparkSession.builder \
+    .appName("Finance_Pro_ML_Backtest") \
+    .config("spark.jars", JAR_PATH) \
+    .config("spark.driver.extraClassPath", JAR_PATH) \
+    .config("spark.executor.extraClassPath", JAR_PATH) \
+    .config("spark.hadoop.fs.gs.impl", "com.google.cloud.hadoop.fs.gcs.GoogleHadoopFileSystem") \
+    .config("spark.hadoop.fs.AbstractFileSystem.gs.impl", "com.google.cloud.hadoop.fs.gcs.GoogleHadoopFileSystem") \
+    .config("spark.hadoop.google.cloud.auth.service.account.enable", "true") \
+    .config("spark.hadoop.google.cloud.auth.service.account.json.keyfile", KEY_PATH) \
+    .getOrCreate()
 
 
 def run_ml_analysis():

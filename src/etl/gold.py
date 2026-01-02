@@ -1,5 +1,4 @@
 import os
-
 from pyspark.sql import SparkSession
 from pyspark.sql.window import Window
 from pyspark.sql.functions import (
@@ -14,6 +13,7 @@ JAR_PATH = "/tmp/gcs-connector.jar"
 
 spark = SparkSession.builder \
     .appName("Finance_Gold_Advanced_Features") \
+    .config("spark.sql.sources.partitionOverwriteMode", "dynamic") \
     .config("spark.jars", JAR_PATH) \
     .config("spark.driver.extraClassPath", JAR_PATH) \
     .config("spark.executor.extraClassPath", JAR_PATH) \
@@ -21,6 +21,7 @@ spark = SparkSession.builder \
     .config("spark.hadoop.fs.AbstractFileSystem.gs.impl", "com.google.cloud.hadoop.fs.gcs.GoogleHadoopFileSystem") \
     .config("spark.hadoop.google.cloud.auth.service.account.enable", "true") \
     .config("spark.hadoop.google.cloud.auth.service.account.json.keyfile", KEY_PATH) \
+    .config("spark.hadoop.mapreduce.fileoutputcommitter.marksuccessfuljobs", "false") \
     .getOrCreate()
 
 
@@ -40,7 +41,6 @@ def calculate_technical_indicators(df):
         .withColumn("macd_line", col("ema_12") - col("ema_26"))
 
     df = df.withColumn("diff", col("close") - lag("close", 1).over(w_spec))
-
     df = df.withColumn("gain", when(col("diff") > 0, col("diff")).otherwise(0)) \
         .withColumn("loss", when(col("diff") < 0, spark_abs(col("diff"))).otherwise(0))
 
@@ -55,10 +55,14 @@ def calculate_technical_indicators(df):
 
 
 def create_advanced_gold():
-    df_prices = spark.read.parquet(f"gs://{BUCKET_NAME}/silver/prices/")
-    df_fund = spark.read.parquet(f"gs://{BUCKET_NAME}/silver/fundamentals/")
+    try:
+        df_prices = spark.read.parquet(f"gs://{BUCKET_NAME}/silver/prices/")
+        df_fund = spark.read.parquet(f"gs://{BUCKET_NAME}/silver/fundamentals/")
+    except Exception as e:
+        print(f"[ERREUR] Impossible de lire les données Silver : {e}")
+        return
 
-    df_fund_clean = df_fund.withColumn("end_date_filled", coalesce(col("end_date"), lit("2099-12-31")))
+    df_fund_clean = df_fund.withColumn("end_date_filled", coalesce(col("end_date"), lit("2099-12-31").cast("date")))
 
     cond = [
         df_prices.symbol == df_fund_clean.symbol,
@@ -67,6 +71,7 @@ def create_advanced_gold():
     ]
 
     df_joined = df_prices.join(df_fund_clean, cond, "left").drop(df_fund_clean.symbol)
+
     df_indicators = calculate_technical_indicators(df_joined)
 
     w_lead = Window.partitionBy("symbol").orderBy("trade_date")
@@ -81,8 +86,9 @@ def create_advanced_gold():
         lead("close", 1).over(w_lead).alias("target_price_next_day")
     ).dropna()
 
-    df_final.write.mode("overwrite").partitionBy("symbol").parquet(f"gs://{BUCKET_NAME}/gold/advanced_features/")
-    print("Gold Advanced terminé.")
+    output_path = f"gs://{BUCKET_NAME}/gold/advanced_features/"
+    df_final.write.mode("overwrite").partitionBy("symbol").parquet(output_path)
+    print("Gold Advanced terminé avec succès.")
 
 
 if __name__ == "__main__":

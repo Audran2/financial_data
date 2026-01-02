@@ -55,7 +55,7 @@ jobs:
           # python src/etl/silver.py
           
           echo "--- Lancement Spark Gold ---"
-          # python src/etl/gold.py
+          python src/etl/gold.py
           
           echo "--- Lancement ML & Backtest ---"
           python src/spark_ml.py

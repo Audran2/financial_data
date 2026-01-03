@@ -59,15 +59,16 @@ def fetch_twelvedata_prices(symbol):
 
 
 def fetch_fmp_ratios(symbol):
-    url = f"https://financialmodelingprep.com/stable/key-metrics-ttm"
+    url = f"https://financialmodelingprep.com/stable/ratios"
     params = {
         "symbol": symbol,
         "apikey": FMP_API_KEY,
-        "limit": 1
+        "period": "annual",
+        "limit": 5
     }
 
     try:
-        response = requests.get(url, params=params)
+        response = requests.get(url, params=params, timeout=10)
         response.raise_for_status()
         data = response.json()
 

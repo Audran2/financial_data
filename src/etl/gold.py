@@ -3,7 +3,7 @@ from pyspark.sql import SparkSession
 from pyspark.sql.window import Window
 from pyspark.sql.functions import (
     col, avg, stddev, lag, when, abs as spark_abs,
-    lead, coalesce, lit
+    lead, row_number, desc, count, isnan, log
 )
 
 # --- CONFIGURATION ---
@@ -13,7 +13,6 @@ JAR_PATH = "/tmp/gcs-connector.jar"
 
 spark = SparkSession.builder \
     .appName("Finance_Gold_Advanced_Features") \
-    .config("spark.sql.sources.partitionOverwriteMode", "dynamic") \
     .config("spark.jars", JAR_PATH) \
     .config("spark.driver.extraClassPath", JAR_PATH) \
     .config("spark.executor.extraClassPath", JAR_PATH) \
@@ -21,6 +20,7 @@ spark = SparkSession.builder \
     .config("spark.hadoop.fs.AbstractFileSystem.gs.impl", "com.google.cloud.hadoop.fs.gcs.GoogleHadoopFileSystem") \
     .config("spark.hadoop.google.cloud.auth.service.account.enable", "true") \
     .config("spark.hadoop.google.cloud.auth.service.account.json.keyfile", KEY_PATH) \
+    .config("spark.sql.sources.partitionOverwriteMode", "dynamic") \
     .config("spark.hadoop.mapreduce.fileoutputcommitter.marksuccessfuljobs", "false") \
     .getOrCreate()
 
@@ -55,58 +55,84 @@ def calculate_technical_indicators(df):
 
 
 def create_advanced_gold():
-    print("--- Début Gold Layer ---")
-
     try:
         df_prices = spark.read.parquet(f"gs://{BUCKET_NAME}/silver/prices/")
         df_fund = spark.read.parquet(f"gs://{BUCKET_NAME}/silver/fundamentals/")
-
-        print(f"DEBUG: Lignes Prix trouvées : {df_prices.count()}")
-        print(f"DEBUG: Lignes Fondamentaux trouvées : {df_fund.count()}")
-
+        print(f"DEBUG: Prix chargés : {df_prices.count()} | Fondamentaux chargés : {df_fund.count()}")
     except Exception as e:
         print(f"[ERREUR] Impossible de lire Silver : {e}")
         return
 
-    df_fund_clean = df_fund.withColumn("end_date_filled", coalesce(col("end_date"), lit("2099-12-31").cast("date")))
-
-    cond = [
-        df_prices.symbol == df_fund_clean.symbol,
-        df_prices.trade_date >= df_fund_clean.start_date,
-        df_prices.trade_date < df_fund_clean.end_date_filled
-    ]
-
-    df_joined = df_prices.join(df_fund_clean, cond, "left").drop(df_fund_clean.symbol)
-    print(f"DEBUG: Lignes après Jointure : {df_joined.count()}")
-
-    df_indicators = calculate_technical_indicators(df_joined)
-
-    w_lead = Window.partitionBy("symbol").orderBy("trade_date")
-
-    # Sélection
-    df_final_temp = df_indicators.select(
-        "symbol", "trade_date", "close", "volume",
-        col("rsi_14"),
-        col("macd_line"),
-        ((col("close") - col("bollinger_lower")) / (col("bollinger_upper") - col("bollinger_lower"))).alias("pct_b"),
-        col("pe_ratio"), col("debt_to_equity"),
-        ((lead("close", 1).over(w_lead) - col("close")) / col("close")).alias("target_return_next_day")
+    fund_renamed = df_fund.select(
+        col("symbol").alias("f_symbol"),
+        col("report_date").alias("f_date"),
+        col("pe_ratio"), col("debt_to_equity")
     )
 
-    df_filled = df_final_temp.na.fill(0, subset=["pe_ratio", "debt_to_equity", "rsi_14", "macd_line", "pct_b"])
+    cond = [
+        df_prices.symbol == fund_renamed.f_symbol,
+        fund_renamed.f_date <= df_prices.trade_date
+    ]
+
+    df_merged = df_prices.join(fund_renamed, cond, "left")
+    w_filter = Window.partitionBy("symbol", "trade_date").orderBy(desc("f_date"))
+
+    df_joined = df_merged.withColumn("rn", row_number().over(w_filter)) \
+        .filter(col("rn") == 1) \
+        .drop("rn", "f_symbol", "f_date")
+
+    df_calc = calculate_technical_indicators(df_joined)
+    w_spec = Window.partitionBy("symbol").orderBy("trade_date")
+    df_calc = df_calc.withColumn("daily_return", log(col("close") / lag("close", 1).over(w_spec)))
+
+    df_calc = df_calc.withColumn("return_lag_1", lag("daily_return", 1).over(w_spec)) \
+        .withColumn("return_lag_2", lag("daily_return", 2).over(w_spec)) \
+        .withColumn("return_lag_3", lag("daily_return", 3).over(w_spec))
+
+    w_vol = w_spec.rowsBetween(-9, 0)
+    df_calc = df_calc.withColumn("volatility_10d", stddev("daily_return").over(w_vol))
+
+
+    w_lead = Window.partitionBy("symbol").orderBy("trade_date")
+    bb_width = col("bollinger_upper") - col("bollinger_lower")
+
+    df_final_temp = df_calc.select(
+        "symbol", "trade_date", "close", "volume",
+        col("rsi_14"), col("macd_line"),
+
+        col("return_lag_1"), col("return_lag_2"), col("return_lag_3"),
+        col("volatility_10d"),
+
+        when(bb_width == 0, 0).otherwise((col("close") - col("bollinger_lower")) / bb_width).alias("pct_b"),
+
+        col("pe_ratio"), col("debt_to_equity"),
+
+        when(col("close") == 0, 0)
+        .otherwise((lead("close", 1).over(w_lead) - col("close")) / col("close"))
+        .alias("target_return_next_day")
+    )
+
+    fill_cols = ["pe_ratio", "debt_to_equity", "rsi_14", "macd_line", "pct_b",
+                 "return_lag_1", "return_lag_2", "return_lag_3", "volatility_10d"]
+
+    df_filled = df_final_temp.na.fill(0, subset=fill_cols)
+
+    df_filled.select(
+        count(when(col("trade_date").isNull(), col("trade_date"))).alias("nb_null_dates"),
+        count(when(col("close").isNull() | isnan(col("close")), col("close"))).alias("nb_null_close")
+    ).show()
 
     df_final = df_filled.dropna(subset=["trade_date", "close"])
 
-    count_final = df_final.count()
-    print(f"DEBUG: Lignes FINALES à écrire : {count_final}")
+    rows = df_final.count()
+    print(f"Lignes à écrire : {rows}")
 
-    if count_final == 0:
-        print("[ALERTE] Le DataFrame final est vide ! Vérifie les dates de jointure ou les données Silver.")
-    else:
+    if rows > 0:
         output_path = f"gs://{BUCKET_NAME}/gold/advanced_features/"
-        print(f"Écriture Gold dans : {output_path}")
         df_final.write.mode("overwrite").partitionBy("symbol").parquet(output_path)
-        print("Gold Advanced terminé avec succès.")
+        print("[SUCCESS] Gold Features terminé.")
+    else:
+        print("[ALERTE] DataFrame vide !")
 
 
 if __name__ == "__main__":

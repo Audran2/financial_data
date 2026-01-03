@@ -1,12 +1,12 @@
 import os
-
 from pyspark.sql import SparkSession
+from pyspark.sql.utils import AnalysisException
 from pyspark.ml import Pipeline
 from pyspark.ml.feature import VectorAssembler, StandardScaler
 from pyspark.ml.regression import GBTRegressor
 from pyspark.ml.evaluation import RegressionEvaluator
 from pyspark.ml.tuning import ParamGridBuilder, CrossValidator
-from pyspark.sql.functions import col, when, sum as spark_sum, avg
+from pyspark.sql.functions import col, when
 
 # --- CONFIGURATION ---
 BUCKET_NAME = os.getenv("BUCKET_NAME", "finance_datalake")
@@ -26,27 +26,50 @@ spark = SparkSession.builder \
 
 
 def run_ml_analysis():
-    df = spark.read.parquet(f"gs://{BUCKET_NAME}/gold/advanced_features/")
+    print("--- Chargement des données Gold ---")
+    try:
+        df_raw = spark.read.parquet(f"gs://{BUCKET_NAME}/gold/advanced_features/")
+    except AnalysisException:
+        print(f"[ERREUR] Dossier Gold vide ou introuvable.")
+        return
+
+    features = [
+        "rsi_14", "macd_line", "pct_b", "pe_ratio", "debt_to_equity", "volume",
+        "return_lag_1", "return_lag_2", "return_lag_3", "volatility_10d"
+    ]
+    label_col = "target_return_next_day"
+
+    print("Nettoyage des données (Drop Nulls)...")
+    df = df_raw.na.drop(subset=[label_col] + features)
+
+    row_count = df.count()
+    print(f"Données propres prêtes pour ML : {row_count} lignes")
+
+    if row_count == 0:
+        print("Erreur: Plus de données après nettoyage !")
+        return
 
     split_date = "2024-06-01"
     train = df.filter(col("trade_date") < split_date)
     test = df.filter(col("trade_date") >= split_date)
 
-    features = ["rsi_14", "macd_line", "pct_b", "pe_ratio", "debt_to_equity", "volume"]
+    if train.count() == 0 or test.count() == 0:
+        print("Erreur: Train ou Test set vide. Vérifie la date de split.")
+        return
 
     assembler = VectorAssembler(inputCols=features, outputCol="features_raw")
     scaler = StandardScaler(inputCol="features_raw", outputCol="features", withStd=True, withMean=True)
-    gbt = GBTRegressor(featuresCol="features", labelCol="target_return_next_day", seed=42)
+    gbt = GBTRegressor(featuresCol="features", labelCol=label_col, seed=42)
     pipeline = Pipeline(stages=[assembler, scaler, gbt])
 
-    print("Début du Grid Search...")
+    print("Début de l'entraînement (Cross Validation)...")
 
     parameter_grid = ParamGridBuilder() \
-        .addGrid(gbt.maxDepth, [5, 10]) \
-        .addGrid(gbt.maxIter, [20]) \
+        .addGrid(gbt.maxDepth, [5, 8]) \
+        .addGrid(gbt.maxIter, [20, 40]) \
         .build()
 
-    evaluator = RegressionEvaluator(labelCol="target_return_next_day", metricName="rmse")
+    evaluator = RegressionEvaluator(labelCol=label_col, metricName="rmse")
 
     cv = CrossValidator(estimator=pipeline,
                         estimatorParamMaps=parameter_grid,
@@ -57,34 +80,30 @@ def run_ml_analysis():
     best_model = model.bestModel
     print(f"Meilleur modèle trouvé (RMSE sur train): {min(model.avgMetrics)}")
 
+    gbt_model = best_model.stages[-1]
+    print("Importance des Features : ", gbt_model.featureImportances)
+
+    print("Prédictions sur le Test Set...")
     predictions = best_model.transform(test)
 
-
     analysis = predictions.withColumn(
-        "strategy_signal", when(col("prediction") > 0.001, 1).otherwise(0)
+        "strategy_signal", when(col("prediction") > 0, 1).otherwise(0)
     ).withColumn(
-        "strategy_return", col("strategy_signal") * col("target_return_next_day")
+        "strategy_return", col("strategy_signal") * col(label_col)
     ).withColumn(
-        "market_return", col("target_return_next_day")
+        "market_return", col(label_col)
     )
-
-    results = analysis.groupBy("symbol").agg(
-        spark_sum("market_return").alias("total_market_return"),
-        spark_sum("strategy_return").alias("total_model_return"),
-        avg("prediction").alias("avg_predicted_return")
-    )
-
-    print("--- RÉSULTATS DU BACKTEST ---")
-    results.show()
 
     output_viz = analysis.select(
         "symbol", "trade_date", "close",
-        "target_return_next_day", "prediction",
+        label_col, "prediction",
         "strategy_return", "market_return"
     )
 
-    output_viz.write.mode("overwrite").parquet(f"gs://{BUCKET_NAME}/gold/backtest_results/")
-    print("Résultats exportés pour visualisation.")
+    output_path = f"gs://{BUCKET_NAME}/gold/backtest_results/"
+    print(f"Export vers : {output_path}")
+    output_viz.write.mode("overwrite").parquet(output_path)
+    print("[SUCCESS] Job ML terminé.")
 
 
 if __name__ == "__main__":

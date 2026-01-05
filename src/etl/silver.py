@@ -83,28 +83,45 @@ def process_prices_timeseries():
 
 def process_fundamentals_scd2():
     print(f"--- Traitement des fondamentaux ---")
+
+    df_new = spark.read.json(PATH_BRONZE_FUND)
+    df_new = df_new.withColumn("effective_date", lit(TODAY_STR).cast("date"))
+
     try:
-        df_raw = spark.read.json(PATH_BRONZE_FUND)
-        if df_raw.count() == 0: return
-    except Exception:
-        print("[INFO] Pas de nouveaux fondamentaux.")
-        return
+        df_existing = spark.read.parquet(PATH_SILVER_FUND)
+    except:
+        df_existing = None
 
-    expected_cols = ["symbol", "date", "priceToEarningsRatio", "debtToEquityRatio"]
-    for c in expected_cols:
-        if c not in df_raw.columns:
-            df_raw = df_raw.withColumn(c, lit(None))
+    if df_existing:
+        df_to_expire = df_existing.alias("old") \
+            .join(df_new.alias("new"),
+                  (col("old.symbol") == col("new.symbol")) &
+                  (col("old.is_current") == True) &
+                  ((col("old.pe_ratio") != col("new.pe_ratio")) |
+                   (col("old.debt_to_equity") != col("new.debt_to_equity"))),
+                  "inner") \
+            .select("old.*") \
+            .withColumn("is_current", lit(False)) \
+            .withColumn("expiration_date", lit(TODAY_STR).cast("date"))
 
-    df_clean = df_raw.select(
-        col("symbol"),
-        col("date").cast("date").alias("report_date"),
-        col("priceToEarningsRatio").cast("double").alias("pe_ratio"),
-        col("debtToEquityRatio").cast("double").alias("debt_to_equity"),
-        lit(TODAY_STR).cast("date").alias("effective_date")
-    )
+        df_unchanged = df_existing.join(
+            df_to_expire,
+            ["symbol", "effective_date"],
+            "left_anti"
+        )
 
-    print(f"[INFO] Ajout des fondamentaux dans : {PATH_SILVER_FUND}")
-    df_clean.write.mode("overwrite").parquet(PATH_SILVER_FUND)
+        df_new_flagged = df_new \
+            .withColumn("is_current", lit(True)) \
+            .withColumn("expiration_date", lit(None).cast("date"))
+
+        df_final = df_unchanged.union(df_to_expire).union(df_new_flagged)
+    else:
+        df_final = df_new \
+            .withColumn("is_current", lit(True)) \
+            .withColumn("expiration_date", lit(None).cast("date"))
+
+    df_final.write.mode("overwrite").parquet(PATH_SILVER_FUND)
+
     print(f"[SUCCESS] Silver Fundamentals mis à jour.")
 
 

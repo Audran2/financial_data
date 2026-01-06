@@ -109,6 +109,11 @@ def process_fundamentals_scd2():
 
     try:
         df_existing = spark.read.parquet(PATH_SILVER_FUND)
+
+        df_existing = df_existing.cache()
+        count_existing = df_existing.count()
+        print(f"[INFO] {count_existing} lignes existantes chargées")
+
         has_history = True
 
         if "is_current" not in df_existing.columns:
@@ -141,8 +146,10 @@ def process_fundamentals_scd2():
             col("old.effective_date")
         )
 
-        if df_changes.count() > 0:
-            print(f"[INFO] {df_changes.count()} lignes détectées comme modifiées - expiration en cours")
+        changes_count = df_changes.count()
+
+        if changes_count > 0:
+            print(f"[INFO] {changes_count} lignes détectées comme modifiées - expiration en cours")
 
             df_to_expire = df_changes \
                 .withColumn("is_current", lit(False)) \
@@ -158,19 +165,31 @@ def process_fundamentals_scd2():
             df_to_expire = spark.createDataFrame([], df_existing.schema)
             df_unchanged = df_existing
 
+        df_existing.unpersist()
+
         df_new_flagged = df_new_clean \
             .withColumn("is_current", lit(True)) \
             .withColumn("expiration_date", lit(None).cast("date"))
 
         df_final = df_unchanged.union(df_to_expire).union(df_new_flagged)
+
+        df_final = df_final.cache()
+        final_count = df_final.count()
+        print(f"[INFO] {final_count} lignes à écrire")
+
     else:
         df_final = df_new_clean \
             .withColumn("is_current", lit(True)) \
             .withColumn("expiration_date", lit(None).cast("date"))
-        print("[INFO] Première ingestion de fondamentaux avec SCD2")
+
+        df_final = df_final.cache()
+        final_count = df_final.count()
+        print(f"[INFO] Première ingestion de fondamentaux avec SCD2 : {final_count} lignes")
 
     print(f"[INFO] Écriture dans : {PATH_SILVER_FUND}")
     df_final.write.mode("overwrite").parquet(PATH_SILVER_FUND)
+
+    df_final.unpersist()
 
     total = df_final.count()
     current = df_final.filter(col("is_current") == True).count()

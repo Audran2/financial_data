@@ -34,7 +34,7 @@ spark = SparkSession.builder \
 
 
 def process_prices_timeseries():
-    print(f"--- Traitement prix (Schéma Strict & Overwrite) ---")
+    print(f"[INFO] Traitement prix (Schéma Strict & Overwrite)")
 
     price_schema = StructType([
         StructField("meta", StructType([
@@ -81,48 +81,102 @@ def process_prices_timeseries():
     df_final_to_write = df_silver.dropna(subset=["trade_date", "close", "volume"])
     df_final_to_write.write.mode("overwrite").partitionBy("trade_date").parquet(PATH_SILVER_PRICES)
 
-def process_fundamentals_scd2():
-    print(f"--- Traitement des fondamentaux ---")
 
-    df_new = spark.read.json(PATH_BRONZE_FUND)
-    df_new = df_new.withColumn("effective_date", lit(TODAY_STR).cast("date"))
+def process_fundamentals_scd2():
+    print(f"[INFO] Traitement des fondamentaux")
+
+    try:
+        df_raw = spark.read.json(PATH_BRONZE_FUND)
+        if df_raw.count() == 0:
+            print("[INFO] Pas de nouveaux fondamentaux.")
+            return
+    except Exception as e:
+        print(f"[INFO] Pas de nouveaux fondamentaux : {e}")
+        return
+
+    expected_cols = ["symbol", "date", "priceToEarningsRatio", "debtToEquityRatio"]
+    for c in expected_cols:
+        if c not in df_raw.columns:
+            df_raw = df_raw.withColumn(c, lit(None))
+
+    df_new_clean = df_raw.select(
+        col("symbol"),
+        col("date").cast("date").alias("report_date"),
+        col("priceToEarningsRatio").cast("double").alias("pe_ratio"),
+        col("debtToEquityRatio").cast("double").alias("debt_to_equity"),
+        lit(TODAY_STR).cast("date").alias("effective_date")
+    )
 
     try:
         df_existing = spark.read.parquet(PATH_SILVER_FUND)
+        has_history = True
+
+        if "is_current" not in df_existing.columns:
+            print("[INFO] Migration vers SCD2 : ajout des colonnes is_current et expiration_date")
+            df_existing = df_existing \
+                .withColumn("is_current", lit(True)) \
+                .withColumn("expiration_date", lit(None).cast("date"))
     except:
         df_existing = None
+        has_history = False
+        print("[INFO] Première ingestion - pas d'historique existant")
 
-    if df_existing:
-        df_to_expire = df_existing.alias("old") \
-            .join(df_new.alias("new"),
+    if has_history and df_existing is not None:
+        df_current = df_existing.filter(col("is_current") == True)
+
+        df_changes = df_current.alias("old") \
+            .join(df_new_clean.alias("new"),
                   (col("old.symbol") == col("new.symbol")) &
-                  (col("old.is_current") == True) &
-                  ((col("old.pe_ratio") != col("new.pe_ratio")) |
-                   (col("old.debt_to_equity") != col("new.debt_to_equity"))),
+                  (col("old.report_date") == col("new.report_date")),
                   "inner") \
-            .select("old.*") \
-            .withColumn("is_current", lit(False)) \
-            .withColumn("expiration_date", lit(TODAY_STR).cast("date"))
-
-        df_unchanged = df_existing.join(
-            df_to_expire,
-            ["symbol", "effective_date"],
-            "left_anti"
+            .where(
+            (col("old.pe_ratio") != col("new.pe_ratio")) |
+            (col("old.debt_to_equity") != col("new.debt_to_equity"))
+        ) \
+            .select(
+            col("old.symbol"),
+            col("old.report_date"),
+            col("old.pe_ratio"),
+            col("old.debt_to_equity"),
+            col("old.effective_date")
         )
 
-        df_new_flagged = df_new \
+        if df_changes.count() > 0:
+            print(f"[INFO] {df_changes.count()} lignes détectées comme modifiées - expiration en cours")
+
+            df_to_expire = df_changes \
+                .withColumn("is_current", lit(False)) \
+                .withColumn("expiration_date", lit(TODAY_STR).cast("date"))
+
+            df_unchanged = df_existing.join(
+                df_changes,
+                ["symbol", "report_date", "effective_date"],
+                "left_anti"
+            )
+        else:
+            print("[INFO] Aucune modification détectée")
+            df_to_expire = spark.createDataFrame([], df_existing.schema)
+            df_unchanged = df_existing
+
+        df_new_flagged = df_new_clean \
             .withColumn("is_current", lit(True)) \
             .withColumn("expiration_date", lit(None).cast("date"))
 
         df_final = df_unchanged.union(df_to_expire).union(df_new_flagged)
     else:
-        df_final = df_new \
+        df_final = df_new_clean \
             .withColumn("is_current", lit(True)) \
             .withColumn("expiration_date", lit(None).cast("date"))
+        print("[INFO] Première ingestion de fondamentaux avec SCD2")
 
+    print(f"[INFO] Écriture dans : {PATH_SILVER_FUND}")
     df_final.write.mode("overwrite").parquet(PATH_SILVER_FUND)
 
-    print(f"[SUCCESS] Silver Fundamentals mis à jour.")
+    total = df_final.count()
+    current = df_final.filter(col("is_current") == True).count()
+    expired = df_final.filter(col("is_current") == False).count()
+
+    print(f"[SUCCESS] Silver Fundamentals mis à jour - Total: {total} | Actifs: {current} | Expirés: {expired}")
 
 
 if __name__ == "__main__":

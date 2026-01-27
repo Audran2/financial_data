@@ -39,23 +39,20 @@ def run_ml_analysis():
     ]
     label_col = "target_return_next_day"
 
-    print("Nettoyage des données (Drop Nulls)...")
-    df = df_raw.na.drop(subset=[label_col] + features)
+    print("Préparation des données pour l'entraînement...")
 
-    row_count = df.count()
-    print(f"Données propres prêtes pour ML : {row_count} lignes")
+    df_train_ready = df_raw.na.drop(subset=[label_col] + features)
+
+    row_count = df_train_ready.count()
+    print(f"Données d'entraînement disponibles : {row_count} lignes")
 
     if row_count == 0:
-        print("Erreur: Plus de données après nettoyage !")
+        print("Erreur: Pas assez de données pour entraîner.")
         return
 
     split_date = "2024-06-01"
-    train = df.filter(col("trade_date") < split_date)
-    test = df.filter(col("trade_date") >= split_date)
-
-    if train.count() == 0 or test.count() == 0:
-        print("Erreur: Train ou Test set vide. Vérifie la date de split.")
-        return
+    train = df_train_ready.filter(col("trade_date") < split_date)
+    test = df_train_ready.filter(col("trade_date") >= split_date)
 
     assembler = VectorAssembler(inputCols=features, outputCol="features_raw")
     scaler = StandardScaler(inputCol="features_raw", outputCol="features", withStd=True, withMean=True)
@@ -78,12 +75,9 @@ def run_ml_analysis():
 
     model = cv.fit(train)
     best_model = model.bestModel
-    print(f"Meilleur modèle trouvé (RMSE sur train): {min(model.avgMetrics)}")
+    print(f"RMSE sur train: {min(model.avgMetrics)}")
 
-    gbt_model = best_model.stages[-1]
-    print("Importance des Features : ", gbt_model.featureImportances)
-
-    print("Prédictions sur le Test Set...")
+    print("Génération du Backtest...")
     predictions = best_model.transform(test)
 
     analysis = predictions.withColumn(
@@ -94,16 +88,43 @@ def run_ml_analysis():
         "market_return", col(label_col)
     )
 
-    output_viz = analysis.select(
-        "symbol", "trade_date", "close",
-        label_col, "prediction",
-        "strategy_return", "market_return"
-    )
+    output_cols = ["symbol", "trade_date", "close", label_col, "prediction", "strategy_return",
+                   "market_return"] + features
+    output_viz = analysis.select(output_cols)
 
-    output_path = f"gs://{BUCKET_NAME}/gold/backtest_results/"
-    print(f"Export vers : {output_path}")
-    output_viz.write.mode("overwrite").parquet(output_path)
-    print("[SUCCESS] Job ML terminé.")
+    path_backtest = f"gs://{BUCKET_NAME}/gold/backtest_results/"
+    print(f"Export Backtest vers : {path_backtest}")
+    output_viz.write.mode("overwrite").parquet(path_backtest)
+
+    print("\n--- Génération des Prédictions Futures ---")
+
+    max_date_row = df_raw.agg({"trade_date": "max"}).collect()[0]
+    last_date = max_date_row[0]
+    print(f"Date de prédiction : {last_date}")
+
+    df_future = df_raw.filter(col("trade_date") == last_date)
+
+    df_future_clean = df_future.na.drop(subset=features)
+
+    if df_future_clean.count() > 0:
+        future_preds = best_model.transform(df_future_clean)
+
+        final_future = future_preds.select(
+            "symbol", "trade_date", "close", "prediction"
+        ).withColumn(
+            "conseil", when(col("prediction") > 0, "ACHETER").otherwise("ATTENDRE")
+        ).withColumn(
+            "prediction_pct", col("prediction") * 100
+        )
+
+        path_future = f"gs://{BUCKET_NAME}/gold/future_predictions/"
+        print(f"Export Prédictions Futures vers : {path_future}")
+
+        final_future.write.mode("overwrite").parquet(path_future)
+
+        print("[SUCCESS] Prédictions sauvegardées.")
+    else:
+        print("[WARN] Impossible de faire des prédictions (Features manquantes pour la dernière date).")
 
 
 if __name__ == "__main__":

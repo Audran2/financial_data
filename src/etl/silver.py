@@ -171,7 +171,7 @@ def process_fundamentals_scd2():
             .withColumn("is_current", lit(True)) \
             .withColumn("expiration_date", lit(None).cast("date"))
 
-        df_final = df_unchanged.union(df_to_expire).union(df_new_flagged)
+        df_final = df_unchanged.unionByName(df_to_expire).unionByName(df_new_flagged)
 
         df_final = df_final.cache()
         final_count = df_final.count()

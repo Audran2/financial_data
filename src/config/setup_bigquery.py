@@ -1,11 +1,13 @@
 import os
 from google.cloud import bigquery
+from google.oauth2 import service_account
 
 PROJECT_ID = "tribal-pillar-480213-i1"
 DATASET_ID = "finance_analytics"
 BUCKET_NAME = os.getenv("BUCKET_NAME", "finance_datalake")
 
-client = bigquery.Client(project=PROJECT_ID)
+credentials = service_account.Credentials.from_service_account_file(KEY_PATH)
+client = bigquery.Client(project=PROJECT_ID, credentials=credentials)
 
 
 def create_or_replace_external_table(table_name, gcs_uri, schema):
@@ -34,17 +36,17 @@ def main():
     schema_backtest = [
         bigquery.SchemaField("symbol", "STRING"),
         bigquery.SchemaField("trade_date", "DATE"),
-        bigquery.SchemaField("close", "DOUBLE"),
-        bigquery.SchemaField("target_return_next_day", "DOUBLE"),
-        bigquery.SchemaField("prediction", "DOUBLE"),
+        bigquery.SchemaField("close", "FLOAT"),
+        bigquery.SchemaField("target_return_next_day", "FLOAT"),
+        bigquery.SchemaField("prediction", "FLOAT"),
         bigquery.SchemaField("strategy_signal", "INTEGER"),
-        bigquery.SchemaField("strategy_return", "DOUBLE"),
-        bigquery.SchemaField("market_return", "DOUBLE"),
-        bigquery.SchemaField("cum_strategy_return", "DOUBLE"),
-        bigquery.SchemaField("cum_market_return", "DOUBLE"),
-        bigquery.SchemaField("strategy_wealth", "DOUBLE"),
-        bigquery.SchemaField("market_wealth", "DOUBLE"),
-        bigquery.SchemaField("drawdown", "DOUBLE"),
+        bigquery.SchemaField("strategy_return", "FLOAT"),
+        bigquery.SchemaField("market_return", "FLOAT"),
+        bigquery.SchemaField("cum_strategy_return", "FLOAT"),
+        bigquery.SchemaField("cum_market_return", "FLOAT"),
+        bigquery.SchemaField("strategy_wealth", "FLOAT"),
+        bigquery.SchemaField("market_wealth", "FLOAT"),
+        bigquery.SchemaField("drawdown", "FLOAT"),
     ]
 
     create_or_replace_external_table(
@@ -55,19 +57,19 @@ def main():
 
     schema_metrics = [
         bigquery.SchemaField("symbol", "STRING"),
-        bigquery.SchemaField("total_strategy_return", "DOUBLE"),
-        bigquery.SchemaField("total_market_return", "DOUBLE"),
-        bigquery.SchemaField("alpha", "DOUBLE"),
+        bigquery.SchemaField("total_strategy_return", "FLOAT"),
+        bigquery.SchemaField("total_market_return", "FLOAT"),
+        bigquery.SchemaField("alpha", "FLOAT"),
         bigquery.SchemaField("num_trading_days", "INTEGER"),
         bigquery.SchemaField("num_days_invested", "INTEGER"),
-        bigquery.SchemaField("avg_daily_strategy_return", "DOUBLE"),
-        bigquery.SchemaField("avg_daily_market_return", "DOUBLE"),
-        bigquery.SchemaField("stddev_strategy_return", "DOUBLE"),
-        bigquery.SchemaField("stddev_market_return", "DOUBLE"),
-        bigquery.SchemaField("sharpe_ratio", "DOUBLE"),
-        bigquery.SchemaField("sharpe_ratio_market", "DOUBLE"),
-        bigquery.SchemaField("max_drawdown", "DOUBLE"),
-        bigquery.SchemaField("model_precision_pct", "DOUBLE"),
+        bigquery.SchemaField("avg_daily_strategy_return", "FLOAT"),
+        bigquery.SchemaField("avg_daily_market_return", "FLOAT"),
+        bigquery.SchemaField("stddev_strategy_return", "FLOAT"),
+        bigquery.SchemaField("stddev_market_return", "FLOAT"),
+        bigquery.SchemaField("sharpe_ratio", "FLOAT"),
+        bigquery.SchemaField("sharpe_ratio_market", "FLOAT"),
+        bigquery.SchemaField("max_drawdown", "FLOAT"),
+        bigquery.SchemaField("model_precision_pct", "FLOAT"),
     ]
 
     create_or_replace_external_table(
@@ -79,10 +81,10 @@ def main():
     schema_future = [
         bigquery.SchemaField("symbol", "STRING"),
         bigquery.SchemaField("trade_date", "DATE"),
-        bigquery.SchemaField("close", "DOUBLE"),
-        bigquery.SchemaField("prediction", "DOUBLE"),
+        bigquery.SchemaField("close", "FLOAT"),
+        bigquery.SchemaField("prediction", "FLOAT"),
         bigquery.SchemaField("conseil", "STRING"),
-        bigquery.SchemaField("prediction_pct", "DOUBLE"),
+        bigquery.SchemaField("prediction_pct", "FLOAT"),
     ]
 
     create_or_replace_external_table(

@@ -7,7 +7,7 @@ from pyspark.sql.functions import (
     lead, row_number, desc, count, isnan, log, lit,
     pandas_udf
 )
-from pyspark.sql.types import DoubleType
+from pyspark.sql.types import DoubleType, StructType, StructField, StringType, TimestampType, LongType
 
 # --- CONFIGURATION ---
 BUCKET_NAME = os.getenv("BUCKET_NAME", "finance_datalake")
@@ -16,6 +16,7 @@ JAR_PATH = "/tmp/gcs-connector.jar"
 
 spark = SparkSession.builder \
     .appName("Finance_Gold_Advanced_Features") \
+    .config("spark.driver.memory", "4g") \
     .config("spark.jars", JAR_PATH) \
     .config("spark.driver.extraClassPath", JAR_PATH) \
     .config("spark.executor.extraClassPath", JAR_PATH) \
@@ -28,20 +29,15 @@ spark = SparkSession.builder \
     .getOrCreate()
 
 
-@pandas_udf(DoubleType())
-def ema_udf(close: pd.Series) -> pd.Series:
+def calculate_ema_group(pdf: pd.DataFrame) -> pd.DataFrame:
     """
-    Calcule une EMA sur la série complète du groupe (partitionBy symbol).
-    Le span est passé via une colonne auxiliaire pour éviter les closures.
-    On utilise span=12 par défaut ici ; on appelle cette UDF deux fois
-    avec des colonnes d'input différentes pour avoir ema_12 et ema_26.
+    Calcule les EMAs pour un groupe (symbol).
+    Reçoit un DataFrame pandas trié par trade_date.
     """
-    return close.ewm(span=12, adjust=False).mean()
-
-
-@pandas_udf(DoubleType())
-def ema_26_udf(close: pd.Series) -> pd.Series:
-    return close.ewm(span=26, adjust=False).mean()
+    pdf = pdf.sort_values("trade_date")
+    pdf["ema_12"] = pdf["close"].ewm(span=12, adjust=False).mean()
+    pdf["ema_26"] = pdf["close"].ewm(span=26, adjust=False).mean()
+    return pdf
 
 
 def calculate_technical_indicators(df):
@@ -53,16 +49,15 @@ def calculate_technical_indicators(df):
            .withColumn("bollinger_upper", col("sma_20") + (col("stddev_20") * 2)) \
            .withColumn("bollinger_lower", col("sma_20") - (col("stddev_20") * 2))
 
-    df = df.withColumn("ema_12", ema_udf("close").over(
-        Window.partitionBy("symbol").orderBy("trade_date")
-              .rowsBetween(Window.unboundedPreceding, Window.currentRow)
-    ))
-    df = df.withColumn("ema_26", ema_26_udf("close").over(
-        Window.partitionBy("symbol").orderBy("trade_date")
-              .rowsBetween(Window.unboundedPreceding, Window.currentRow)
-    ))
+    output_schema = StructType([field for field in df.schema.fields] + [
+        StructField("ema_12", DoubleType(), True),
+        StructField("ema_26", DoubleType(), True)
+    ])
+    df = df.groupBy("symbol").applyInPandas(calculate_ema_group, schema=output_schema)
+
     df = df.withColumn("macd_line", col("ema_12") - col("ema_26"))
 
+    w_spec = Window.partitionBy("symbol").orderBy("trade_date")
     w_12 = w_spec.rowsBetween(-11, 0)
     w_26 = w_spec.rowsBetween(-25, 0)
     df = df.withColumn("sma_diff", avg("close").over(w_12) - avg("close").over(w_26))

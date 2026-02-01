@@ -20,6 +20,7 @@ JAR_PATH = "/tmp/gcs-connector.jar"
 
 spark = SparkSession.builder \
     .appName("Finance_Pro_ML_Backtest") \
+    .config("spark.driver.memory", "4g") \
     .config("spark.jars", JAR_PATH) \
     .config("spark.driver.extraClassPath", JAR_PATH) \
     .config("spark.executor.extraClassPath", JAR_PATH) \
@@ -186,12 +187,6 @@ def run_ml_analysis():
     print(f"[INFO] Export Métriques vers : {path_metrics}")
     df_metrics.select(metrics_cols).write.mode("overwrite").parquet(path_metrics)
 
-    print("[INFO] RÉSUMÉ BACKTEST")
-    df_metrics.select(
-        "symbol", "total_strategy_return", "total_market_return", "alpha",
-        "sharpe_ratio", "sharpe_ratio_market", "max_drawdown", "model_precision_pct"
-    ).show(truncate=False)
-
     print("\n--- Génération des Prédictions Futures ---")
 
     max_date_row = df_raw.agg({"trade_date": "max"}).collect()[0]
@@ -216,8 +211,6 @@ def run_ml_analysis():
         print(f"[INFO] Export Prédictions Futures vers : {path_future}")
         final_future.write.mode("overwrite").parquet(path_future)
 
-        print("\n--- Prédictions Futures ---")
-        final_future.show(truncate=False)
         print("[SUCCESS] Prédictions sauvegardées.")
     else:
         print("[WARN] Impossible de faire des prédictions (Features manquantes pour la dernière date).")

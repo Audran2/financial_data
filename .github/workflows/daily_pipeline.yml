@@ -59,5 +59,3 @@ jobs:
           
           echo "--- Lancement ML & Backtest ---"
           python src/spark_ml.py
-      - name: Setup BigQuery Tables
-        run: python src/config/setup_bigquery.py

@@ -21,6 +21,7 @@ PATH_SILVER_FUND = f"gs://{BUCKET_NAME}/silver/fundamentals/"
 
 spark = SparkSession.builder \
     .appName("Finance_Bronze_To_Silver_ETL_Strict") \
+    .config("spark.driver.memory", "4g") \
     .config("spark.jars", JAR_PATH) \
     .config("spark.driver.extraClassPath", JAR_PATH) \
     .config("spark.executor.extraClassPath", JAR_PATH) \

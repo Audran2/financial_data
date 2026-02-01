@@ -1,12 +1,17 @@
 import os
 from pyspark.sql import SparkSession
 from pyspark.sql.utils import AnalysisException
+from pyspark.sql.window import Window
 from pyspark.ml import Pipeline
 from pyspark.ml.feature import VectorAssembler, StandardScaler
 from pyspark.ml.regression import GBTRegressor
 from pyspark.ml.evaluation import RegressionEvaluator
 from pyspark.ml.tuning import ParamGridBuilder, CrossValidator
-from pyspark.sql.functions import col, when
+from pyspark.sql.functions import (
+    col, when, lit, exp, sum as spark_sum, min as spark_min,
+    max as spark_max, avg as spark_avg, stddev as spark_stddev,
+    count as spark_count, sqrt
+)
 
 # --- CONFIGURATION ---
 BUCKET_NAME = os.getenv("BUCKET_NAME", "finance_datalake")
@@ -30,29 +35,37 @@ def run_ml_analysis():
     try:
         df_raw = spark.read.parquet(f"gs://{BUCKET_NAME}/gold/advanced_features/")
     except AnalysisException:
-        print(f"[ERREUR] Dossier Gold vide ou introuvable.")
+        print("[ERREUR] Dossier Gold vide ou introuvable.")
         return
 
     features = [
-        "rsi_14", "macd_line", "pct_b", "pe_ratio", "debt_to_equity", "volume",
+        "rsi_14", "macd_line", "sma_diff", "pct_b",
+        "pe_ratio", "debt_to_equity", "volume",
         "return_lag_1", "return_lag_2", "return_lag_3", "volatility_10d"
     ]
     label_col = "target_return_next_day"
 
     print("Préparation des données pour l'entraînement...")
-
     df_train_ready = df_raw.na.drop(subset=[label_col] + features)
 
     row_count = df_train_ready.count()
-    print(f"Données d'entraînement disponibles : {row_count} lignes")
+    print(f"Données disponibles après nettoyage : {row_count} lignes")
 
     if row_count == 0:
-        print("Erreur: Pas assez de données pour entraîner.")
+        print("[ERREUR] Pas assez de données pour entraîner.")
         return
 
     split_date = "2024-06-01"
     train = df_train_ready.filter(col("trade_date") < split_date)
     test = df_train_ready.filter(col("trade_date") >= split_date)
+
+    train_count = train.count()
+    test_count = test.count()
+    print(f"Train : {train_count} lignes | Test : {test_count} lignes")
+
+    if train_count == 0 or test_count == 0:
+        print("[ERREUR] Train ou test vide après split temporel.")
+        return
 
     assembler = VectorAssembler(inputCols=features, outputCol="features_raw")
     scaler = StandardScaler(inputCol="features_raw", outputCol="features", withStd=True, withMean=True)
@@ -60,7 +73,6 @@ def run_ml_analysis():
     pipeline = Pipeline(stages=[assembler, scaler, gbt])
 
     print("Début de l'entraînement (Cross Validation)...")
-
     parameter_grid = ParamGridBuilder() \
         .addGrid(gbt.maxDepth, [5, 8]) \
         .addGrid(gbt.maxIter, [20, 40]) \
@@ -68,42 +80,125 @@ def run_ml_analysis():
 
     evaluator = RegressionEvaluator(labelCol=label_col, metricName="rmse")
 
-    cv = CrossValidator(estimator=pipeline,
-                        estimatorParamMaps=parameter_grid,
-                        evaluator=evaluator,
-                        numFolds=3)
+    cv = CrossValidator(
+        estimator=pipeline,
+        estimatorParamMaps=parameter_grid,
+        evaluator=evaluator,
+        numFolds=3
+    )
 
     model = cv.fit(train)
     best_model = model.bestModel
-    print(f"RMSE sur train: {min(model.avgMetrics)}")
+    print(f"[INFO] RMSE moyen (CV) : {min(model.avgMetrics):.6f}")
 
-    print("Génération du Backtest...")
+    print("Génération des prédictions sur le test set...")
     predictions = best_model.transform(test)
 
-    analysis = predictions.withColumn(
-        "strategy_signal", when(col("prediction") > 0, 1).otherwise(0)
+    w_symbol = Window.partitionBy("symbol").orderBy("trade_date")
+
+    df_backtest = predictions.withColumn(
+        "strategy_signal", when(col("prediction") > 0, lit(1)).otherwise(lit(0))
     ).withColumn(
         "strategy_return", col("strategy_signal") * col(label_col)
     ).withColumn(
         "market_return", col(label_col)
+    ).withColumn(
+        "cum_strategy_return", spark_sum("strategy_return").over(w_symbol)
+    ).withColumn(
+        "cum_market_return", spark_sum("market_return").over(w_symbol)
+    ).withColumn(
+        "strategy_wealth", exp(col("cum_strategy_return"))
+    ).withColumn(
+        "market_wealth", exp(col("cum_market_return"))
+    ).withColumn(
+        "strategy_wealth_max", spark_max("strategy_wealth").over(
+            w_symbol.rowsBetween(Window.unboundedPreceding, Window.currentRow)
+        )
+    ).withColumn(
+        "drawdown", (col("strategy_wealth") - col("strategy_wealth_max")) / col("strategy_wealth_max")
     )
 
-    output_cols = ["symbol", "trade_date", "close", label_col, "prediction", "strategy_return",
-                   "market_return"] + features
-    output_viz = analysis.select(output_cols)
+    output_cols = [
+        "symbol", "trade_date", "close",
+        label_col, "prediction",
+        "strategy_signal", "strategy_return", "market_return",
+        "cum_strategy_return", "cum_market_return",
+        "strategy_wealth", "market_wealth",
+        "drawdown"
+    ] + features
 
     path_backtest = f"gs://{BUCKET_NAME}/gold/backtest_results/"
-    print(f"Export Backtest vers : {path_backtest}")
-    output_viz.write.mode("overwrite").parquet(path_backtest)
+    print(f"[INFO] Export Backtest vers : {path_backtest}")
+    df_backtest.select(output_cols).write.mode("overwrite").partitionBy("symbol").parquet(path_backtest)
+
+    trading_days = 252
+
+    df_metrics = df_backtest.groupBy("symbol").agg(
+        spark_max("cum_strategy_return").alias("total_strategy_return"),
+        spark_max("cum_market_return").alias("total_market_return"),
+        spark_count("trade_date").alias("num_trading_days"),
+        spark_avg("strategy_return").alias("avg_daily_strategy_return"),
+        spark_avg("market_return").alias("avg_daily_market_return"),
+        spark_stddev("strategy_return").alias("stddev_strategy_return"),
+        spark_stddev("market_return").alias("stddev_market_return"),
+        spark_min("drawdown").alias("max_drawdown"),
+        spark_sum("strategy_signal").alias("num_days_invested"),
+        spark_sum(
+            when((col("prediction") > 0) & (col(label_col) > 0), lit(1)).otherwise(lit(0))
+        ).alias("true_positives"),
+        spark_sum(
+            when(col("prediction") > 0, lit(1)).otherwise(lit(0))
+        ).alias("total_positive_predictions")
+    ).withColumn(
+        "sharpe_ratio", when(
+            col("stddev_strategy_return") == 0, lit(0)
+        ).otherwise(
+            (col("avg_daily_strategy_return") / col("stddev_strategy_return")) * sqrt(lit(trading_days))
+        )
+    ).withColumn(
+        "sharpe_ratio_market", when(
+            col("stddev_market_return") == 0, lit(0)
+        ).otherwise(
+            (col("avg_daily_market_return") / col("stddev_market_return")) * sqrt(lit(trading_days))
+        )
+    ).withColumn(
+        "model_precision_pct", when(
+            col("total_positive_predictions") == 0, lit(0)
+        ).otherwise(
+            (col("true_positives") / col("total_positive_predictions")) * 100
+        )
+    ).withColumn(
+        "alpha", col("total_strategy_return") - col("total_market_return")
+    )
+
+    metrics_cols = [
+        "symbol",
+        "total_strategy_return", "total_market_return", "alpha",
+        "num_trading_days", "num_days_invested",
+        "avg_daily_strategy_return", "avg_daily_market_return",
+        "stddev_strategy_return", "stddev_market_return",
+        "sharpe_ratio", "sharpe_ratio_market",
+        "max_drawdown",
+        "model_precision_pct"
+    ]
+
+    path_metrics = f"gs://{BUCKET_NAME}/gold/backtest_metrics/"
+    print(f"[INFO] Export Métriques vers : {path_metrics}")
+    df_metrics.select(metrics_cols).write.mode("overwrite").parquet(path_metrics)
+
+    print("[INFO] RÉSUMÉ BACKTEST")
+    df_metrics.select(
+        "symbol", "total_strategy_return", "total_market_return", "alpha",
+        "sharpe_ratio", "sharpe_ratio_market", "max_drawdown", "model_precision_pct"
+    ).show(truncate=False)
 
     print("\n--- Génération des Prédictions Futures ---")
 
     max_date_row = df_raw.agg({"trade_date": "max"}).collect()[0]
     last_date = max_date_row[0]
-    print(f"Date de prédiction : {last_date}")
+    print(f"[INFO] Date de prédiction : {last_date}")
 
     df_future = df_raw.filter(col("trade_date") == last_date)
-
     df_future_clean = df_future.na.drop(subset=features)
 
     if df_future_clean.count() > 0:
@@ -118,10 +213,11 @@ def run_ml_analysis():
         )
 
         path_future = f"gs://{BUCKET_NAME}/gold/future_predictions/"
-        print(f"Export Prédictions Futures vers : {path_future}")
-
+        print(f"[INFO] Export Prédictions Futures vers : {path_future}")
         final_future.write.mode("overwrite").parquet(path_future)
 
+        print("\n--- Prédictions Futures ---")
+        final_future.show(truncate=False)
         print("[SUCCESS] Prédictions sauvegardées.")
     else:
         print("[WARN] Impossible de faire des prédictions (Features manquantes pour la dernière date).")

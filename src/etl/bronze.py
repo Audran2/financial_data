@@ -39,6 +39,16 @@ def upload_to_gcs(data, path_destination):
         logging.error(f"[ERROR] Upload GCS failed pour {path_destination}: {e}")
 
 
+def blob_already_exists(path_destination):
+    try:
+        bucket = GCS_CLIENT.bucket(BUCKET_NAME)
+        blob = bucket.blob(path_destination)
+        return blob.exists()
+    except Exception as e:
+        logging.error(f"[ERROR] Vérification existence échouée pour {path_destination}: {e}")
+        return False
+
+
 def fetch_twelvedata_prices(symbol):
     url = "https://api.twelvedata.com/time_series"
     params = {
@@ -93,16 +103,37 @@ def main():
     today_str = datetime.now().strftime("%Y-%m-%d")
     logging.info(f"--- {today_str} - Début de l'ingestion ---")
 
-    for symbol in SYMBOLS:
-        prices_data = fetch_twelvedata_prices(symbol)
-        if prices_data:
-            path_prices = f"bronze/twelvedata/prices/dt={today_str}/{symbol}.json"
-            upload_to_gcs(prices_data, path_prices)
+    skipped_prices = 0
+    skipped_fund = 0
+    fetched_prices = 0
+    fetched_fund = 0
 
-        fund_data = fetch_fmp_ratios(symbol)
-        if fund_data:
-            path_fund = f"bronze/fmp/ratios/dt={today_str}/{symbol}.json"
-            upload_to_gcs(fund_data, path_fund)
+    for symbol in SYMBOLS:
+        path_prices = f"bronze/twelvedata/prices/dt={today_str}/{symbol}.json"
+
+        if blob_already_exists(path_prices):
+            logging.info(f"[SKIP] Prix déjà ingérés aujourd'hui pour {symbol} — pas de re-fetch API")
+            skipped_prices += 1
+        else:
+            prices_data = fetch_twelvedata_prices(symbol)
+            if prices_data:
+                upload_to_gcs(prices_data, path_prices)
+                fetched_prices += 1
+
+        path_fund = f"bronze/fmp/ratios/dt={today_str}/{symbol}.json"
+
+        if blob_already_exists(path_fund):
+            logging.info(f"[SKIP] Fondamentaux déjà ingérés aujourd'hui pour {symbol} — pas de re-fetch API")
+            skipped_fund += 1
+        else:
+            fund_data = fetch_fmp_ratios(symbol)
+            if fund_data:
+                upload_to_gcs(fund_data, path_fund)
+                fetched_fund += 1
+
+    logging.info(f"--- Fin ingestion ---")
+    logging.info(f"Prix  : {fetched_prices} fetched | {skipped_prices} skipped")
+    logging.info(f"Funds : {fetched_fund} fetched | {skipped_fund} skipped")
 
 
 if __name__ == "__main__":

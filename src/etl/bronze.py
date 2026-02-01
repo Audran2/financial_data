@@ -12,7 +12,11 @@ FMP_API_KEY = os.getenv("FMP_KEY")
 PROJECT_ID = "tribal-pillar-480213-i1"
 BUCKET_NAME = "finance_datalake"
 
-SYMBOLS = ["AAPL", "GOOGL", "MSFT", "TSLA", "NVDA", "AMZN"]
+SYMBOLS = [
+    "AAPL", "GOOGL", "MSFT", "TSLA", "NVDA", "AMZN", "META", "AMD",
+    "JPM", "V",
+    "KO", "WMT", "XOM", "DIS"
+]
 
 try:
     GCS_CLIENT = storage.Client(project=PROJECT_ID)

@@ -10,7 +10,7 @@ from pyspark.ml.tuning import ParamGridBuilder, CrossValidator
 from pyspark.sql.functions import (
     col, when, lit, exp, sum as spark_sum, min as spark_min,
     max as spark_max, avg as spark_avg, stddev as spark_stddev,
-    count as spark_count, sqrt
+    count as spark_count, sqrt, row_number
 )
 
 # --- CONFIGURATION ---
@@ -28,6 +28,10 @@ spark = SparkSession.builder \
     .config("spark.hadoop.fs.AbstractFileSystem.gs.impl", "com.google.cloud.hadoop.fs.gcs.GoogleHadoopFileSystem") \
     .config("spark.hadoop.google.cloud.auth.service.account.enable", "true") \
     .config("spark.hadoop.google.cloud.auth.service.account.json.keyfile", KEY_PATH) \
+    .config("spark.sql.sources.partitionOverwriteMode", "dynamic") \
+    .config("spark.hadoop.fs.gs.committer.scheme", "hadoop") \
+    .config("spark.hadoop.mapreduce.fileoutputcommitter.algorithm", "2") \
+    .config("spark.hadoop.mapreduce.fileoutputcommitter.marksuccessfuljobs", "false") \
     .getOrCreate()
 
 
@@ -96,19 +100,30 @@ def run_ml_analysis():
     predictions = best_model.transform(test)
 
     w_symbol = Window.partitionBy("symbol").orderBy("trade_date")
+    w_date = Window.partitionBy("trade_date").orderBy(col("prediction").desc())
 
     df_backtest = predictions.withColumn(
-        "strategy_signal", when(col("prediction") > 0, lit(1)).otherwise(lit(0))
+        "strategy_signal", when(col("prediction") > -0.005, lit(1)).otherwise(lit(0))
+    ).withColumn(
+        "prediction_rank", row_number().over(w_date)
+    ).withColumn(
+        "strategy_signal_rank", when(col("prediction_rank") <= 6, lit(1)).otherwise(lit(0))
     ).withColumn(
         "strategy_return", col("strategy_signal") * col(label_col)
+    ).withColumn(
+        "strategy_return_rank", col("strategy_signal_rank") * col(label_col)
     ).withColumn(
         "market_return", col(label_col)
     ).withColumn(
         "cum_strategy_return", spark_sum("strategy_return").over(w_symbol)
     ).withColumn(
+        "cum_strategy_return_rank", spark_sum("strategy_return_rank").over(w_symbol)
+    ).withColumn(
         "cum_market_return", spark_sum("market_return").over(w_symbol)
     ).withColumn(
         "strategy_wealth", exp(col("cum_strategy_return"))
+    ).withColumn(
+        "strategy_wealth_rank", exp(col("cum_strategy_return_rank"))
     ).withColumn(
         "market_wealth", exp(col("cum_market_return"))
     ).withColumn(
@@ -116,16 +131,23 @@ def run_ml_analysis():
             w_symbol.rowsBetween(Window.unboundedPreceding, Window.currentRow)
         )
     ).withColumn(
+        "strategy_wealth_rank_max", spark_max("strategy_wealth_rank").over(
+            w_symbol.rowsBetween(Window.unboundedPreceding, Window.currentRow)
+        )
+    ).withColumn(
         "drawdown", (col("strategy_wealth") - col("strategy_wealth_max")) / col("strategy_wealth_max")
+    ).withColumn(
+        "drawdown_rank", (col("strategy_wealth_rank") - col("strategy_wealth_rank_max")) / col("strategy_wealth_rank_max")
     )
 
     output_cols = [
         "symbol", "trade_date", "close",
-        label_col, "prediction",
-        "strategy_signal", "strategy_return", "market_return",
-        "cum_strategy_return", "cum_market_return",
-        "strategy_wealth", "market_wealth",
-        "drawdown"
+        label_col, "prediction", "prediction_rank",
+        "strategy_signal", "strategy_signal_rank",
+        "strategy_return", "strategy_return_rank", "market_return",
+        "cum_strategy_return", "cum_strategy_return_rank", "cum_market_return",
+        "strategy_wealth", "strategy_wealth_rank", "market_wealth",
+        "drawdown", "drawdown_rank"
     ] + features
 
     path_backtest = f"gs://{BUCKET_NAME}/gold/backtest_results/"
@@ -137,13 +159,19 @@ def run_ml_analysis():
     df_metrics = df_backtest.groupBy("symbol").agg(
         spark_max("cum_strategy_return").alias("total_strategy_return"),
         spark_max("cum_market_return").alias("total_market_return"),
+        spark_max("cum_strategy_return_rank").alias("total_strategy_return_rank"),
         spark_count("trade_date").alias("num_trading_days"),
         spark_avg("strategy_return").alias("avg_daily_strategy_return"),
         spark_avg("market_return").alias("avg_daily_market_return"),
+        spark_avg("strategy_return_rank").alias("avg_daily_strategy_return_rank"),
         spark_stddev("strategy_return").alias("stddev_strategy_return"),
         spark_stddev("market_return").alias("stddev_market_return"),
+        spark_stddev("strategy_return_rank").alias("stddev_strategy_return_rank"),
         spark_min("drawdown").alias("max_drawdown"),
+        spark_min("drawdown_rank").alias("max_drawdown_rank"),
         spark_sum("strategy_signal").alias("num_days_invested"),
+        spark_sum("strategy_signal_rank").alias("num_days_invested_rank"),
+
         spark_sum(
             when((col("prediction") > 0) & (col(label_col) > 0), lit(1)).otherwise(lit(0))
         ).alias("true_positives"),
@@ -155,6 +183,12 @@ def run_ml_analysis():
             col("stddev_strategy_return") == 0, lit(0)
         ).otherwise(
             (col("avg_daily_strategy_return") / col("stddev_strategy_return")) * sqrt(lit(trading_days))
+        )
+    ).withColumn(
+        "sharpe_ratio_rank", when(
+            col("stddev_strategy_return_rank") == 0, lit(0)
+        ).otherwise(
+            (col("avg_daily_strategy_return_rank") / col("stddev_strategy_return_rank")) * sqrt(lit(trading_days))
         )
     ).withColumn(
         "sharpe_ratio_market", when(
@@ -170,16 +204,19 @@ def run_ml_analysis():
         )
     ).withColumn(
         "alpha", col("total_strategy_return") - col("total_market_return")
+    ).withColumn(
+        "alpha_rank", col("total_strategy_return_rank") - col("total_market_return")
     )
 
     metrics_cols = [
         "symbol",
-        "total_strategy_return", "total_market_return", "alpha",
-        "num_trading_days", "num_days_invested",
-        "avg_daily_strategy_return", "avg_daily_market_return",
-        "stddev_strategy_return", "stddev_market_return",
-        "sharpe_ratio", "sharpe_ratio_market",
-        "max_drawdown",
+        "total_strategy_return", "total_strategy_return_rank", "total_market_return",
+        "alpha", "alpha_rank",
+        "num_trading_days", "num_days_invested", "num_days_invested_rank",
+        "avg_daily_strategy_return", "avg_daily_strategy_return_rank", "avg_daily_market_return",
+        "stddev_strategy_return", "stddev_strategy_return_rank", "stddev_market_return",
+        "sharpe_ratio", "sharpe_ratio_rank", "sharpe_ratio_market",
+        "max_drawdown", "max_drawdown_rank",
         "model_precision_pct"
     ]
 
@@ -187,8 +224,18 @@ def run_ml_analysis():
     print(f"[INFO] Export Métriques vers : {path_metrics}")
     df_metrics.select(metrics_cols).write.mode("overwrite").parquet(path_metrics)
 
-    print("\n--- Génération des Prédictions Futures ---")
+    df_metrics.select(
+        "symbol", "total_strategy_return", "total_market_return", "alpha",
+        "sharpe_ratio", "sharpe_ratio_market", "max_drawdown", "model_precision_pct"
+    ).show(truncate=False)
 
+    print("\n--- Stratégie Ranking (Top 40%) ---")
+    df_metrics.select(
+        "symbol", "total_strategy_return_rank", "total_market_return", "alpha_rank",
+        "sharpe_ratio_rank", "sharpe_ratio_market", "max_drawdown_rank"
+    ).show(truncate=False)
+
+    print("\n--- Génération des Prédictions Futures ---")
     max_date_row = df_raw.agg({"trade_date": "max"}).collect()[0]
     last_date = max_date_row[0]
     print(f"[INFO] Date de prédiction : {last_date}")

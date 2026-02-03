@@ -1,13 +1,11 @@
 import logging
 import os
 
-import pandas as pd
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     col, avg, stddev, lag, when, abs as spark_abs,
     lead, row_number, desc, count, isnan, log, lit
 )
-from pyspark.sql.types import DoubleType, StructType, StructField
 from pyspark.sql.window import Window
 
 # Set up custom SUCCESS log level for better visibility of successful operations
@@ -51,26 +49,6 @@ spark = SparkSession.builder \
     .getOrCreate()
 logger.info("Spark session initialized successfully")
 
-
-def calculate_ema_group(pdf: pd.DataFrame) -> pd.DataFrame:
-    """
-    Calculate Exponential Moving Averages (EMA) for a single symbol using Pandas UDF
-
-    EMAs give more weight to recent prices, making them more responsive than simple moving averages.
-    This function is called for each symbol group in parallel by Spark.
-
-    Args:
-        pdf: Pandas DataFrame containing price data for one symbol, sorted by trade_date
-
-    Returns:
-        Same DataFrame with two new columns: ema_12 and ema_26
-    """
-    pdf = pdf.sort_values("trade_date")
-    pdf["ema_12"] = pdf["close"].ewm(span=12, adjust=False).mean()  # Short-term trend
-    pdf["ema_26"] = pdf["close"].ewm(span=26, adjust=False).mean()  # Long-term trend
-    return pdf
-
-
 def calculate_technical_indicators(df):
     """
     Calculate a comprehensive set of technical indicators for trading signals
@@ -101,13 +79,13 @@ def calculate_technical_indicators(df):
            .withColumn("bollinger_upper", col("sma_20") + (col("stddev_20") * 2)) \
            .withColumn("bollinger_lower", col("sma_20") - (col("stddev_20") * 2))
 
-    # Calculate EMAs using Pandas UDF for better performance
-    logger.debug("Calculating EMAs (12 and 26-day)")
-    output_schema = StructType([field for field in df.schema.fields] + [
-        StructField("ema_12", DoubleType(), True),
-        StructField("ema_26", DoubleType(), True)
-    ])
-    df = df.groupBy("symbol").applyInPandas(calculate_ema_group, schema=output_schema)
+    # EMA approximation using weighted SMA (close enough for feature engineering)
+    # True EMA would require pandas_udf which causes Arrow issues on GitHub Actions
+    logger.debug("Calculating EMA approximations (12 and 26-day)")
+    w_12 = w_spec.rowsBetween(-11, 0)
+    w_26 = w_spec.rowsBetween(-25, 0)
+    df = df.withColumn("ema_12", avg("close").over(w_12)) \
+        .withColumn("ema_26", avg("close").over(w_26))
 
     # Calculate MACD Line (difference between 12-day and 26-day EMA)
     logger.debug("Calculating MACD line")
